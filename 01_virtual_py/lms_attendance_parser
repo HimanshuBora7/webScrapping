@@ -1,0 +1,230 @@
+import re
+from bs4 import BeautifulSoup
+import pandas as pd
+
+def parse_ims_attendance(html_content, debug=True):
+    """
+    Custom parser for IMS attendance HTML
+    Designed specifically for the IMS table structure
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    if debug:
+        print("\n" + "="*80)
+        print("🔍 PARSING IMS ATTENDANCE TABLE")
+        print("="*80)
+    
+    # Find all tables
+    tables = soup.find_all('table')
+    
+    if len(tables) < 2:
+        print("❌ Not enough tables found!")
+        return []
+    
+    # First table with 90% width is the attendance data
+    data_table = None
+    legend_table = None
+    
+    for table in tables:
+        width = table.get('width', '')
+        if width == '90%':
+            if data_table is None:
+                data_table = table  # First 90% table is data
+            else:
+                legend_table = table  # Second 90% table is legend
+                break
+    
+    if not data_table:
+        print("❌ No attendance table found!")
+        return []
+    
+    rows = data_table.find_all('tr')
+    
+    if debug:
+        print(f"\n📊 Found attendance table with {len(rows)} rows")
+    
+    # Extract header row with subject codes
+    header_row = None
+    for row in rows:
+        cells = row.find_all(['td', 'th'])
+        cell_texts = [cell.get_text(strip=True) for cell in cells]
+        
+        # The header row has "Days" followed by subject codes
+        if cell_texts and cell_texts[0] == 'Days':
+            header_row = cell_texts
+            break
+    
+    if not header_row:
+        print("❌ Could not find header row!")
+        return []
+    
+    # Extract subject codes (skip "Days" column)
+    subject_codes = header_row[1:]
+    if debug:
+        print(f"\n📋 Subject Codes: {subject_codes}")
+    
+    # Initialize data storage
+    attendance_data = {code: {
+        'Subject Code': code,
+        'Total Classes': 0,
+        'Total Absent': 0,
+        'Total Present': 0,
+        'Overall Class': 0,
+        'Overall Absent': 0,
+        'Overall Present': 0,
+        'Overall (%)': '0.00%'
+    } for code in subject_codes}
+    
+    # Process data rows
+    for row in rows:
+        cells = row.find_all(['td', 'th'])
+        
+        if len(cells) < 2:
+            continue
+        
+        first_cell = cells[0].get_text(strip=True)
+        values = [cell.get_text(strip=True) for cell in cells[1:]]
+        
+        # Match the different metric rows
+        if first_cell == 'Total Classes':
+            for i, code in enumerate(subject_codes):
+                if i < len(values):
+                    attendance_data[code]['Total Classes'] = values[i]
+        
+        elif 'Total' in first_cell and 'Absent' in first_cell:
+            for i, code in enumerate(subject_codes):
+                if i < len(values):
+                    attendance_data[code]['Total Absent'] = values[i]
+        
+        elif 'Total' in first_cell and 'Present' in first_cell:
+            for i, code in enumerate(subject_codes):
+                if i < len(values):
+                    attendance_data[code]['Total Present'] = values[i]
+        
+        elif first_cell == 'Overall Class':
+            for i, code in enumerate(subject_codes):
+                if i < len(values):
+                    attendance_data[code]['Overall Class'] = values[i]
+        
+        elif 'Overall' in first_cell and 'Absent' in first_cell:
+            for i, code in enumerate(subject_codes):
+                if i < len(values):
+                    attendance_data[code]['Overall Absent'] = values[i]
+        
+        elif 'Overall' in first_cell and 'Present' in first_cell:
+            for i, code in enumerate(subject_codes):
+                if i < len(values):
+                    attendance_data[code]['Overall Present'] = values[i]
+        
+        elif 'Overall (%)' in first_cell or 'Overall%' in first_cell:
+            for i, code in enumerate(subject_codes):
+                if i < len(values):
+                    attendance_data[code]['Overall (%)'] = values[i]
+    
+    # Extract subject names from the legend table
+    subject_names = {}
+    
+    if legend_table:
+        # Find the <b> tag with subject names
+        bold = legend_table.find('b')
+        if bold:
+            # Get inner HTML and split by <br> tags (could be <br> or <br/>)
+            legend_html = str(bold)
+            parts = re.split(r'<br\s*/?>', legend_html)
+            
+            for part in parts:
+                # Remove HTML tags
+                clean = re.sub(r'<[^>]+>', '', part).strip()
+                
+                # Match CODE-Name pattern
+                match = re.match(r'^([A-Z]{4,5}\d{3,4})-(.+)$', clean)
+                if match:
+                    code = match.group(1).strip()
+                    name = match.group(2).strip()
+                    
+                    # Only keep if it's one of our subject codes
+                    if code in subject_codes:
+                        subject_names[code] = name
+    
+    if debug:
+        print(f"\n📚 Subject Names Found:")
+        for code in subject_codes:
+            if code in subject_names:
+                print(f"   {code}: {subject_names[code]}")
+            else:
+                print(f"   {code}: (not found)")
+    
+    # Add subject names to attendance data
+    for code in subject_codes:
+        if code in subject_names:
+            attendance_data[code]['Subject Name'] = subject_names[code]
+        else:
+            attendance_data[code]['Subject Name'] = 'Unknown'
+    
+    # Convert to list of records
+    result = list(attendance_data.values())
+    
+    if debug:
+        print(f"\n✅ Successfully extracted data for {len(result)} subjects")
+        print("="*80)
+    
+    return result
+
+
+# Test the parser
+if __name__ == "__main__":
+    # Read the HTML file
+    with open('attendance_data.html', 'r', encoding='utf-8') as f:
+        html_content = f.read()
+    
+    # Parse the data
+    attendance_records = parse_ims_attendance(html_content, debug=True)
+    
+    if attendance_records:
+        # Create DataFrame
+        df = pd.DataFrame(attendance_records)
+        
+        # Reorder columns for better readability
+        column_order = [
+            'Subject Code', 
+            'Subject Name', 
+            'Overall Present', 
+            'Overall Absent', 
+            'Overall Class', 
+            'Overall (%)'
+        ]
+        
+        # Only include columns that exist
+        df = df[[col for col in column_order if col in df.columns]]
+        
+        # Save to CSV
+        df.to_csv('attendance_parsed.csv', index=False)
+        print(f"\n💾 Saved to attendance_parsed.csv")
+        
+        # Display the results
+        print("\n" + "="*80)
+        print("📊 ATTENDANCE SUMMARY")
+        print("="*80)
+        
+        for _, row in df.iterrows():
+            code = row['Subject Code']
+            name = row.get('Subject Name', 'N/A')
+            present = row.get('Overall Present', 'N/A')
+            absent = row.get('Overall Absent', 'N/A')
+            total = row.get('Overall Class', 'N/A')
+            percentage = row.get('Overall (%)', 'N/A')
+            
+            print(f"\n🎓 {code} - {name}")
+            print(f"   Present: {present}/{total} classes ({absent} absent)")
+            print(f"   Attendance: {percentage}")
+        
+        print("\n" + "="*80)
+        
+        # Also save to Excel if possible
+        try:
+            df.to_excel('attendance_parsed.xlsx', index=False, engine='openpyxl')
+            print(f"💾 Also saved to attendance_parsed.xlsx")
+        except Exception as e:
+            print(f"⚠️  Excel export failed: {e}")
+    else:
+        print("\n❌ No data extracted!")
